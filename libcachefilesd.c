@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include <unistd.h>
 #include <sys/types.h>
+#include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <stdlib.h>
@@ -9,42 +10,66 @@
 #include <errno.h>
 #include <poll.h>
 #include <stdint.h>
+#include <passfds.h>
+#include <sys/ipc.h>
+#include <sys/shm.h>
 
 #include "internal.h"
 
 
 #define NAME_MAX 512
+
 struct fd_path_link {
 	int object_id;
 	int fd;
 	int size;
 	char path[NAME_MAX];
-} links[32];
+};
 
-unsigned int link_num = 0;
+struct shm_link {
+	struct fd_path_link links[32];
+	unsigned int link_num;
+};
+
+int g_shm_id = -1;
+
+void supervisor_init_shm(void)
+{
+	if ((g_shm_id = shmget(IPC_PRIVATE, sizeof(struct shm_link), IPC_CREAT | 0777)) < 0)
+	{
+		perror("shmget");
+		exit(1);
+	}
+	void *addr = shmat(g_shm_id, NULL, 0);
+	memset(addr, 0, sizeof(struct shm_link));
+	printf("init shm success id %d\n", g_shm_id);
+}
 
 static struct fd_path_link *find_fd_path_link(int object_id)
 {
-	struct fd_path_link *link;
+	struct shm_link *link;
 	int i;
 
-	for (i = 0; i < link_num; i++) {
-		link = links + i;
-		if (link->object_id == object_id)
-			return link;
+	link = shmat(g_shm_id, 0, 0);
+
+	for (i = 0; i < link->link_num; i++) {
+		if (link->links[i].object_id == object_id)
+			return &link->links[i];
 	}
 	return NULL;
 }
 
-int process_open_req(int devfd, struct cachefiles_msg *msg)
+int process_open_req(int devfd, int sockfd, struct cachefiles_msg *msg)
 {
 	struct cachefiles_open *load;
+	struct shm_link *shm_link;
 	struct fd_path_link *link;
 	char *volume_key, *cookie_key;
 	struct stat stats;
 	char cmd[32];
 	int ret;
 	unsigned long long size;
+	int fds[1];
 
 	load = (void *)msg->data;
 	volume_key = load->data;
@@ -71,17 +96,30 @@ int process_open_req(int devfd, struct cachefiles_msg *msg)
 		return -1;
 	}
 
-	if (link_num >= 32)
+	shm_link = shmat(g_shm_id, 0, 0);
+	if (shm_link == (void *) -1) {
+		printf("get shm address failed %s g_shm_id = %d\n", strerror(errno),g_shm_id);
+	}
+	if (shm_link->link_num >= 32) {
+		printf("shm_link->link_num >= 32\n");
 		return -1;
+	}
 
-	link = links + link_num;
-	link_num ++;
+	link = (struct fd_path_link *)(&shm_link->links[shm_link->link_num]);
+	shm_link->link_num++;
 
-	link->object_id = msg->object_id;
-	link->fd = load->fd;
 	link->size = size;
+	link->object_id = msg->object_id;
 	strncpy(link->path, cookie_key, NAME_MAX);
+	link->fd = load->fd;
 
+	fds[0] = link->fd;
+	ret = sendfds(sockfd, fds, 1);
+	if (ret != 1) {
+		printf("send fd failed!\n");
+	} else {
+		printf("send fd success %d\n", fds[0]);
+	}
 	return 0;
 }
 
@@ -185,7 +223,7 @@ int daemon_get_devfd(const char *fscachedir, const char *tag)
 
 	fd = open("/dev/cachefiles", O_RDWR);
 	if (fd < 0) {
-		printf("open /dev/cachefiles failed\n");
+		printf("open /dev/cachefiles failed %s\n", strerror(errno));
 		return -1;
 	}
 
