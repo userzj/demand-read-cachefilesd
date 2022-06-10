@@ -85,35 +85,6 @@ int process_open_req(int devfd, struct cachefiles_msg *msg)
 	return 0;
 }
 
-/* error injection - return error directly */
-int process_open_req_fail(int devfd, struct cachefiles_msg *msg)
-{
-	struct cachefiles_open *load;
-	char *volume_key, *cookie_key;
-	char cmd[32];
-	int ret, size;
-
-	load = (void *)msg->data;
-	volume_key = load->data;
-	cookie_key = load->data + load->volume_key_size;
-
-	printf("[OPEN] volume key %s (volume_key_size %lu), cookie key %s (cookie_key_size %lu), "
-	       "object id %d, fd %d, flags %u\n",
-		volume_key, load->volume_key_size, cookie_key, load->cookie_key_size,
-		msg->object_id, load->fd, load->flags);
-
-	snprintf(cmd, sizeof(cmd), "copen %u,-1", msg->msg_id);
-	printf("Writing cmd: %s\n", cmd);
-
-	ret = write(devfd, cmd, strlen(cmd));
-	if (ret < 0) {
-		printf("write [copen] failed\n");
-		return -1;
-	}
-
-	return 0;
-}
-
 int process_close_req(int devfd, struct cachefiles_msg *msg)
 {
 	struct fd_path_link *link;
@@ -126,13 +97,6 @@ int process_close_req(int devfd, struct cachefiles_msg *msg)
 
 	printf("[CLOSE] object_id %d, fd %d\n", msg->object_id, link->fd);
 	close(link->fd);
-	return 0;
-}
-
-/* error injection - don't close anon_fd */
-int process_close_req_fail(int devfd, struct cachefiles_msg *msg)
-{
-	printf("[CLOSE] object_id %d\n", msg->object_id);
 	return 0;
 }
 
@@ -209,43 +173,6 @@ int process_read_req(int devfd, struct cachefiles_msg *msg)
 {
 	return do_process_read_req(devfd, msg, 0);
 }
-
-int process_read_req_ra(int devfd, struct cachefiles_msg *msg)
-{
-	return do_process_read_req(devfd, msg, 1);
-}
-
-/* error injection - return error directly */
-int process_read_req_fail(int devfd, struct cachefiles_msg *msg)
-{
-	struct cachefiles_read *read;
-	struct fd_path_link *link;
-	int i, ret, retval = -1;
-	int dst_fd, src_fd;
-	char *src_path = NULL;
-	size_t len;
-	unsigned long id;
-
-	read = (void *)msg->data;
-
-	link = find_fd_path_link(msg->object_id);
-	if (!link) {
-		printf("invalid object id %d\n", msg->object_id);
-		return -1;
-	}
-	dst_fd = link->fd;
-	id = msg->msg_id;
-
-	ret = ioctl(dst_fd, CACHEFILES_IOC_CREAD, id);
-	if (ret < 0) {
-		printf("send cread failed, %d (%s)\n", errno, strerror(errno));
-		close(src_fd);
-		return -1;
-	}
-
-	return 0;
-}
-
 
 int daemon_get_devfd(const char *fscachedir, const char *tag)
 {
