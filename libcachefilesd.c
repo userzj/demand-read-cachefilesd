@@ -208,7 +208,7 @@ int daemon_get_devfd(const char *fscachedir, const char *tag)
 	cmd = "bind ondemand";
 	ret = write(fd, cmd, strlen(cmd));
 	if (ret < 0) {
-		printf("bind failed\n");
+		printf("bind failed %s\n", strerror(errno));
 		goto error;
 	}
 

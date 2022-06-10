@@ -7,6 +7,9 @@
 #include <string.h>
 #include <poll.h>
 #include <stdint.h>
+#include <errno.h>
+#include <sys/types.h>
+#include <sys/wait.h>
 
 #include "internal.h"
 
@@ -46,26 +49,15 @@ static int process_one_req(int devfd)
 	}
 }
 
-int main(int argc, char *argv[])
+static int handle_requests(int devfd)
 {
+	int ret = 0;
 	struct pollfd pollfd;
-	char *fscachedir;
-	int fd, ret;
 
-	if (argc != 2) {
-		printf("Using example: cachefilesd2 <fscachedir>\n");
-		return -1;
-	}
-
-	fscachedir = argv[1];
-
-	fd = daemon_get_devfd(fscachedir, "test");
-	if (fd < 0)
-		return -1;
-
-	pollfd.fd = fd;
+	pollfd.fd = devfd;
 	pollfd.events = POLLIN;
 
+	printf("child process startup, handling reqs\n");
 	while (1) {
 		ret = poll(&pollfd, 1, -1);
 		if (ret < 0) {
@@ -79,8 +71,60 @@ int main(int argc, char *argv[])
 		}
 
 		/* process all pending read requests */
-		while (!process_one_req(fd)) {}
+		while (!process_one_req(devfd)) {}
 	}
+
+	return 0;
+}
+
+static int startup_child_process(int devfd)
+{
+	pid_t pid;
+
+restart:
+	pid = fork();
+	if (pid == 0) {
+		/* child process */
+		handle_requests(devfd);
+	} else if (pid > 0)  {
+		int wstatus = 0;
+
+		/* parent process */
+		if (pid == wait(&wstatus)) {
+			if (WIFSIGNALED(wstatus)) {
+				printf("parent: child be killed, now recover kernel req\n");
+				ssize_t written = write(devfd, "restore", 7);
+				if (written != 7) {
+					printf("recover failed\n");
+					return -1;
+				}
+				printf("parent: recover kernel req success, restart child process...\n");
+				goto restart;
+			}
+		}
+	} else {
+		return pid;
+	}
+
+	return 0;
+}
+
+int main(int argc, char *argv[])
+{
+	char *fscachedir;
+	int devfd, ret;
+
+	if (argc != 2) {
+		printf("Using example: cachefilesd2 <fscachedir>\n");
+		return -1;
+	}
+	fscachedir = argv[1];
+
+	devfd = daemon_get_devfd(fscachedir, "test");
+	if (devfd < 0)
+		return -1;
+
+	startup_child_process(devfd);
 
 	return 0;
 }
