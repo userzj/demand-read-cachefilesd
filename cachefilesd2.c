@@ -10,6 +10,10 @@
 #include <errno.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <sys/ioctl.h>
+#include <sys/ipc.h>
+#include <sys/shm.h>
+#include <pthread.h>
 
 #include "internal.h"
 
@@ -80,6 +84,7 @@ static int handle_requests(int devfd)
 static int startup_child_process(int devfd)
 {
 	pid_t pid;
+	int wstatus = 0;
 
 restart:
 	pid = fork();
@@ -87,8 +92,6 @@ restart:
 		/* child process */
 		handle_requests(devfd);
 	} else if (pid > 0)  {
-		int wstatus = 0;
-
 		/* parent process */
 		if (pid == wait(&wstatus)) {
 			if (WIFSIGNALED(wstatus)) {
@@ -112,13 +115,16 @@ restart:
 int main(int argc, char *argv[])
 {
 	char *fscachedir;
-	int devfd, ret;
+	pthread_t thread;
+	int devfd, ret, shm_id;
 
 	if (argc != 2) {
 		printf("Using example: cachefilesd2 <fscachedir>\n");
 		return -1;
 	}
 	fscachedir = argv[1];
+
+	supervisor_init_shm();
 
 	devfd = daemon_get_devfd(fscachedir, "test");
 	if (devfd < 0)
