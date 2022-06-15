@@ -59,7 +59,7 @@ static struct fd_path_link *find_fd_path_link(int object_id)
 	return NULL;
 }
 
-int process_open_req(int devfd, int sockfd, struct cachefiles_msg *msg)
+int process_open_req(int devfd, struct cachefiles_msg *msg)
 {
 	struct cachefiles_open *load;
 	struct shm_link *shm_link;
@@ -114,12 +114,7 @@ int process_open_req(int devfd, int sockfd, struct cachefiles_msg *msg)
 	link->fd = load->fd;
 
 	fds[0] = link->fd;
-	ret = sendfds(sockfd, fds, 1);
-	if (ret != 1) {
-		printf("send fd failed!\n");
-	} else {
-		printf("send fd success %d\n", fds[0]);
-	}
+
 	return 0;
 }
 

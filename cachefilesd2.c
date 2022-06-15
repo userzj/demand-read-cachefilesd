@@ -9,17 +9,14 @@
 #include <stdint.h>
 #include <errno.h>
 #include <sys/types.h>
-#include <sys/socket.h>
 #include <sys/wait.h>
 #include <sys/ioctl.h>
 #include <sys/ipc.h>
 #include <sys/shm.h>
-#include <pthread.h>
-#include <passfds.h>
 
 #include "internal.h"
 
-static int process_one_req(int devfd, int sockfd)
+static int process_one_req(int devfd)
 {
 	char buf[CACHEFILES_MSG_MAX_SIZE];
 	struct cachefiles_msg *msg;
@@ -44,7 +41,7 @@ static int process_one_req(int devfd, int sockfd)
 
 	switch (msg->opcode) {
 	case CACHEFILES_OP_OPEN:
-		return process_open_req(devfd, sockfd, msg);
+		return process_open_req(devfd, msg);
 	case CACHEFILES_OP_CLOSE:
 		return process_close_req(devfd, msg);
 	case CACHEFILES_OP_READ:
@@ -55,7 +52,7 @@ static int process_one_req(int devfd, int sockfd)
 	}
 }
 
-static int handle_requests(int devfd, int sockfd)
+static int handle_requests(int devfd)
 {
 	int ret = 0;
 	struct pollfd pollfd;
@@ -77,13 +74,13 @@ static int handle_requests(int devfd, int sockfd)
 		}
 
 		/* process all pending read requests */
-		while (!process_one_req(devfd, sockfd)) {}
+		while (!process_one_req(devfd)) {}
 	}
 
 	return 0;
 }
 
-static int startup_child_process(int devfd, int sockfd)
+static int startup_child_process(int devfd)
 {
 	pid_t pid;
 	int wstatus = 0;
@@ -92,7 +89,7 @@ restart:
 	pid = fork();
 	if (pid == 0) {
 		/* child process */
-		handle_requests(devfd, sockfd);
+		handle_requests(devfd);
 	} else if (pid > 0)  {
 		/* parent process */
 		if (pid == wait(&wstatus)) {
@@ -113,30 +110,11 @@ restart:
 
 	return 0;
 }
-void *store_fd_work(void *data) {
-	int receive_fd[1] = {0};
-	int ret;
-	int sockfd = *(int *)data;
-
-	printf("sockfd %d\n", sockfd);
-	while (1) {
-		ret = recvfds(sockfd, receive_fd, 1);
-		if (ret != 1) {
-			printf("recvfds failed!\n");
-			exit(1);
-		}
-		printf("supervisor receive fd %d\n", receive_fd[0]);
-	}
-
-	return NULL;
-}
 
 int main(int argc, char *argv[])
 {
 	char *fscachedir;
-	pthread_t thread;
-	int devfd, ret, shm_id;
-	int sv[2];
+	int devfd, ret;
 
 	if (argc != 2) {
 		printf("Using example: cachefilesd2 <fscachedir>\n");
@@ -146,23 +124,11 @@ int main(int argc, char *argv[])
 
 	supervisor_init_shm();
 
-	ret = socketpair(AF_LOCAL, SOCK_STREAM, 0, sv);
-	if (ret == -1) {
-		perror("socketpair");
-		exit(EXIT_FAILURE);
-	} else {
-		printf("parent sockfd %d , child sockfd %d\n", sv[0], sv[1]);
-	}
-
-	/* parent: create a thread to reveice and keep fd fd's reference */
-	pthread_create(&thread, 0, store_fd_work, &sv[0]);
-
 	devfd = daemon_get_devfd(fscachedir, "test");
 	if (devfd < 0)
 		return -1;
 
-	startup_child_process(devfd, sv[1]);
-	pthread_join(thread, NULL);
+	startup_child_process(devfd);
 
 	return 0;
 }
