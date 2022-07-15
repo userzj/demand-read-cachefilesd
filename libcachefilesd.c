@@ -12,6 +12,7 @@
 #include <stdint.h>
 #include <sys/ipc.h>
 #include <sys/shm.h>
+#include <pthread.h>
 
 #include "internal.h"
 
@@ -28,9 +29,21 @@ struct fd_path_link {
 struct shm_link {
 	struct fd_path_link links[32];
 	unsigned int link_num;
+	pthread_mutex_t mutex;
 };
 
 int g_shm_id = -1;
+struct shm_link *g_shm_link = NULL;
+
+void init_shm_address(void)
+{
+	g_shm_link = shmat(g_shm_id, 0, 0);
+	if (g_shm_link == (void *) -1) {
+		printf("get shm address failed %s g_shm_id = %d\n", strerror(errno),g_shm_id);
+	} else {
+		printf("\tchild[pid %d]: init shm address success! will init threads to handle reqs...\n", getpid());
+	}
+}
 
 void supervisor_init_shm(void)
 {
@@ -39,29 +52,29 @@ void supervisor_init_shm(void)
 		perror("shmget");
 		exit(1);
 	}
-	void *addr = shmat(g_shm_id, NULL, 0);
+	struct shm_link *addr = shmat(g_shm_id, NULL, 0);
 	memset(addr, 0, sizeof(struct shm_link));
-	printf("init shm success id %d\n", g_shm_id);
+	pthread_mutex_init(&addr->mutex, NULL);
 }
 
 static struct fd_path_link *find_fd_path_link(int object_id)
 {
-	struct shm_link *link;
 	int i;
 
-	link = shmat(g_shm_id, 0, 0);
-
-	for (i = 0; i < link->link_num; i++) {
-		if (link->links[i].object_id == object_id)
-			return &link->links[i];
+	pthread_mutex_lock(&g_shm_link->mutex);
+	for (i = 0; i < g_shm_link->link_num; i++) {
+		if (g_shm_link->links[i].object_id == object_id) {
+			pthread_mutex_unlock(&g_shm_link->mutex);
+			return &g_shm_link->links[i];
+		}
 	}
+	pthread_mutex_unlock(&g_shm_link->mutex);
 	return NULL;
 }
 
 int process_open_req(int devfd, struct cachefiles_msg *msg)
 {
 	struct cachefiles_open *load;
-	struct shm_link *shm_link;
 	struct fd_path_link *link;
 	char *volume_key, *cookie_key;
 	struct stat stats;
@@ -86,7 +99,7 @@ int process_open_req(int devfd, struct cachefiles_msg *msg)
 	size = stats.st_size;
 
 	snprintf(cmd, sizeof(cmd), "copen %u,%llu", msg->msg_id, size);
-	printf("Writing cmd: %s\n", cmd);
+	printf("\t<-[COPEN] %s\n", cmd);
 
 	ret = write(devfd, cmd, strlen(cmd));
 	if (ret < 0) {
@@ -94,22 +107,20 @@ int process_open_req(int devfd, struct cachefiles_msg *msg)
 		return -1;
 	}
 
-	shm_link = shmat(g_shm_id, 0, 0);
-	if (shm_link == (void *) -1) {
-		printf("get shm address failed %s g_shm_id = %d\n", strerror(errno),g_shm_id);
-	}
-	if (shm_link->link_num >= 32) {
+	pthread_mutex_lock(&g_shm_link->mutex);
+	if (g_shm_link->link_num >= 32) {
 		printf("shm_link->link_num >= 32\n");
+		pthread_mutex_unlock(&g_shm_link->mutex);
 		return -1;
 	}
 
-	link = (struct fd_path_link *)(&shm_link->links[shm_link->link_num]);
-	shm_link->link_num++;
-
+	link = (struct fd_path_link *)(&g_shm_link->links[g_shm_link->link_num]);
 	link->size = size;
 	link->object_id = msg->object_id;
 	strncpy(link->path, cookie_key, NAME_MAX);
 	link->fd = load->fd;
+	g_shm_link->link_num++;
+	pthread_mutex_unlock(&g_shm_link->mutex);
 
 	return 0;
 }
@@ -174,7 +185,7 @@ static int do_process_read_req(int devfd, struct cachefiles_msg *msg, int ra)
 
 	ret = pread(src_fd, readbuf, len, read->off);
 	if (ret != len) {
-		printf("read src image failed, ret %d, %d (%s)\n", ret, errno, strerror(errno));
+		printf("read src image failed, ret %d, %d (%s) len(%d)\n", ret, errno, strerror(errno), len);
 		close(src_fd);
 		return -1;
 	}

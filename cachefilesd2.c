@@ -17,6 +17,8 @@
 
 #include "internal.h"
 
+#define FSCACHETHREADS	3
+
 static int process_one_req(int devfd)
 {
 	char buf[CACHEFILES_MSG_MAX_SIZE];
@@ -38,7 +40,7 @@ static int process_one_req(int devfd)
 		return -1;
 	}
 
-	printf("[HEADER] id %u, opcode %d\t", msg->msg_id, msg->opcode);
+	printf("[HEADER] id %u, opcode %d tid %lu\t", msg->msg_id, msg->opcode, pthread_self());
 
 	switch (msg->opcode) {
 	case CACHEFILES_OP_OPEN:
@@ -61,7 +63,7 @@ static int handle_requests(int devfd)
 	pollfd.fd = devfd;
 	pollfd.events = POLLIN;
 
-	printf("child process startup, handling reqs\n");
+	printf("\t\tthread startup, tid %lu\n", pthread_self());
 	while (1) {
 		ret = poll(&pollfd, 1, -1);
 		if (ret < 0) {
@@ -81,42 +83,39 @@ static int handle_requests(int devfd)
 	return 0;
 }
 
-static int startup_child_process(int devfd)
+static void *thread_work(void *data)
 {
-	pid_t pid;
-	int wstatus = 0;
+	int devfd = *(int *)data;
 
-restart:
-	pid = fork();
+	handle_requests(devfd);
+
+	return NULL;
+}
+
+static int fork_and_start_thread(int devfd)
+{
+	pthread_t tid[10];
+	int i;
+
+	pid_t pid = fork();
 	if (pid == 0) {
-		/* child process */
-		handle_requests(devfd);
-	} else if (pid > 0)  {
-		/* parent process */
-		if (pid == wait(&wstatus)) {
-			if (WIFSIGNALED(wstatus)) {
-				printf("parent: child be killed, now recover kernel req\n");
-				ssize_t written = write(devfd, "restore", 7);
-				if (written != 7) {
-					printf("recover failed\n");
-					return -1;
-				}
-				printf("parent: recover kernel req success, restart child process...\n");
-				goto restart;
-			}
+		init_shm_address();
+		for (i = 0; i < FSCACHETHREADS; i++) {
+			pthread_create(&tid[i], 0, thread_work, &devfd);
 		}
-	} else {
-		return pid;
+		for (i = 0; i < FSCACHETHREADS; i++) {
+			pthread_join(tid[i], 0);
+		}
 	}
-
-	return 0;
+	return pid;
 }
 
 int main(int argc, char *argv[])
 {
 	char *fscachedir;
-	pthread_t thread;
-	int devfd, ret, shm_id;
+	int devfd, ret;
+	int wstatus = 0;
+	pid_t pid;
 
 	if (argc != 2) {
 		printf("Using example: cachefilesd2 <fscachedir>\n");
@@ -130,7 +129,23 @@ int main(int argc, char *argv[])
 	if (devfd < 0)
 		return -1;
 
-	startup_child_process(devfd);
+restart:
+	printf("supervisor[pid %d]: fork child process\n", getpid());
+	pid = fork_and_start_thread(devfd);
+	if (pid < 0) {
+		printf("fork and start thread failed\n");
+		return -1;
+	}
+	if (pid == wait(&wstatus)) {
+		ssize_t written = write(devfd, "restore", 7);
+		if (written != 7) {
+			printf("supervisor: write restore cmd recover failed\n");
+			return -1;
+		} else {
+			printf("supervisor: restore in-flight IO success\n");
+		}
+		goto restart;
+	}
 
 	return 0;
 }
